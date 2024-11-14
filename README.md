@@ -1,5 +1,7 @@
 # Beris
 
+![CI Badge](https://github.com/fbcarpinato/beris/actions/workflows/rust.yml/badge.svg)
+
 This is a simple, experimental implementation of a Redis-like server written in Rust. It is a work in progress and currently designed to work **only on Linux**.
 
 ## Prerequisites

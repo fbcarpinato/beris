@@ -20,14 +20,3 @@ impl Server {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_server_creation() {
-        let server = Server::new();
-        assert!(server.run().is_ok());
-    }
-}

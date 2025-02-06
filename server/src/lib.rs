@@ -3,7 +3,7 @@ mod event_loop;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    io::{self, Read},
+    io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     rc::Rc,
     thread,
@@ -113,6 +113,17 @@ impl Server {
                         client_id,
                         &buffer[..n]
                     );
+
+
+                    let write_result = {
+                        let mut stream = stream_rc.borrow_mut();
+                        stream.write_all(&mut buffer)
+                    };
+
+                    match write_result {
+                        Ok(_) => {},
+                        Err(_) => {}
+                    }
 
                     follow_up_events.push(Self::create_read_event(client_id, stream_rc.clone()));
                 }

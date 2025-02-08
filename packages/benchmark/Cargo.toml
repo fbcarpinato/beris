@@ -1,0 +1,13 @@
+[package]
+name = "benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "benchmark"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.28", features = ["derive"] }
+
+

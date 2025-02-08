@@ -3,7 +3,12 @@ name = "server"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[[bin]]
+name = "example-server"
+path = "src/bin/main.rs"
 
 [[bench]]
 name = "ping_benchmark"
+
+[dependencies]
+

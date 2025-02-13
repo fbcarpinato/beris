@@ -1,10 +1,9 @@
 mod event_loop;
 
 use std::{
-    cell::RefCell,
     io::{self, Read, Write},
-    net::{TcpListener, TcpStream},
-    rc::Rc,
+    net::{TcpListener, TcpStream, Shutdown},
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -15,8 +14,8 @@ use smallvec::SmallVec;
 
 #[derive(Clone)]
 pub struct SharedState {
-    pub connected_clients: Rc<RefCell<Slab<Rc<RefCell<TcpStream>>>>>,
-    pub listener: Rc<TcpListener>,
+    pub connected_clients: Arc<Mutex<Slab<Arc<Mutex<TcpStream>>>>>,
+    pub listener: Arc<TcpListener>,
 }
 
 pub struct Server {
@@ -30,8 +29,8 @@ impl Server {
         listener.set_nonblocking(true)?;
 
         let state = SharedState {
-            connected_clients: Rc::new(RefCell::new(Slab::new())),
-            listener: Rc::new(listener),
+            connected_clients: Arc::new(Mutex::new(Slab::new())),
+            listener: Arc::new(listener),
         };
 
         Ok(Server {
@@ -43,11 +42,11 @@ impl Server {
     pub fn run(mut self) -> io::Result<()> {
         println!("Server running at 127.0.0.1:6379");
 
-        self.event_loop.push(Self::create_accept_event(self.state.clone()));
+        self.event_loop
+            .push(Self::create_accept_event(self.state.clone()));
 
         loop {
             self.event_loop.run();
-
             thread::sleep(Duration::from_millis(50));
         }
     }
@@ -59,16 +58,18 @@ impl Server {
             match state.listener.accept() {
                 Ok((stream, addr)) => {
                     println!("Accepted connection from {:?}", addr);
+
                     if let Err(e) = stream.set_nonblocking(true) {
                         eprintln!("Failed to set stream nonblocking: {:?}", e);
                     } else {
-                        let stream_rc = Rc::new(RefCell::new(stream));
+                        let stream_arc = Arc::new(Mutex::new(stream));
                         let client_id = state
                             .connected_clients
-                            .borrow_mut()
-                            .insert(stream_rc.clone());
+                            .lock()
+                            .unwrap()
+                            .insert(stream_arc.clone());
 
-                        follow_up_events.push(Self::create_read_event(client_id, stream_rc));
+                        follow_up_events.push(Self::create_read_event(client_id, stream_arc));
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -84,43 +85,45 @@ impl Server {
         })
     }
 
-    fn create_read_event(client_id: usize, stream_rc: Rc<RefCell<TcpStream>>) -> Event {
+    fn create_read_event(client_id: usize, stream_arc: Arc<Mutex<TcpStream>>) -> Event {
         Event::new(move || {
             let mut buffer = [0u8; 1024];
             let mut follow_up_events: SmallVec<[Event; 4]> = SmallVec::new();
 
             let read_result = {
-                let mut stream = stream_rc.borrow_mut();
+                let mut stream = stream_arc.lock().unwrap();
                 stream.read(&mut buffer)
             };
 
             match read_result {
                 Ok(0) => {
                     println!("Client {} disconnected", client_id);
+                    let _ = stream_arc.lock().unwrap().shutdown(Shutdown::Both);
                 }
                 Ok(n) => {
                     println!(
                         "Read {} bytes from client {}: {:?}",
-                        n,
-                        client_id,
-                        &buffer[..n]
+                        n, client_id, &buffer[..n]
                     );
 
-
                     let write_result = {
-                        let mut stream = stream_rc.borrow_mut();
-                        stream.write_all(&mut buffer)
+                        let mut stream = stream_arc.lock().unwrap();
+                        stream.write_all(&buffer[..n])
                     };
 
                     match write_result {
-                        Ok(_) => {},
-                        Err(_) => {}
+                        Ok(_) => {
+                            println!("Echoed {} bytes back to client {}", n, client_id);
+                        }
+                        Err(e) => {
+                            eprintln!("Error writing to client {}: {:?}", client_id, e);
+                        }
                     }
 
-                    follow_up_events.push(Self::create_read_event(client_id, stream_rc.clone()));
+                    follow_up_events.push(Self::create_read_event(client_id, stream_arc.clone()));
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    follow_up_events.push(Self::create_read_event(client_id, stream_rc.clone()));
+                    follow_up_events.push(Self::create_read_event(client_id, stream_arc.clone()));
                 }
                 Err(e) => {
                     eprintln!("Error reading from client {}: {:?}", client_id, e);
@@ -131,3 +134,4 @@ impl Server {
         })
     }
 }
+

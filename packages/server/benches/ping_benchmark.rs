@@ -1,9 +1,9 @@
 #![feature(test)]
 extern crate test;
 
-use test::Bencher;
-use std::net::TcpStream;
 use std::io::{Read, Write};
+use std::net::TcpStream;
+use test::Bencher;
 
 #[bench]
 fn bench_set_command(b: &mut Bencher) {

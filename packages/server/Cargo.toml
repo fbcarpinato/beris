@@ -12,4 +12,5 @@ path = "src/bin/main.rs"
 name = "ping_benchmark"
 
 [dependencies]
+slab = "0.4.9"
 

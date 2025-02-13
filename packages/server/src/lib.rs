@@ -2,7 +2,6 @@ mod event_loop;
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     rc::Rc,
@@ -11,11 +10,11 @@ use std::{
 };
 
 use event_loop::{Event, EventLoop};
+use slab::Slab;
 
 #[derive(Clone)]
 pub struct SharedState {
-    pub connected_clients: Rc<RefCell<HashMap<usize, Rc<RefCell<TcpStream>>>>>,
-    pub next_client_id: Rc<RefCell<usize>>,
+    pub connected_clients: Rc<RefCell<Slab<Rc<RefCell<TcpStream>>>>>,
     pub listener: Rc<TcpListener>,
 }
 
@@ -30,8 +29,7 @@ impl Server {
         listener.set_nonblocking(true)?;
 
         let state = SharedState {
-            connected_clients: Rc::new(RefCell::new(HashMap::new())),
-            next_client_id: Rc::new(RefCell::new(0)),
+            connected_clients: Rc::new(RefCell::new(Slab::new())),
             listener: Rc::new(listener),
         };
 
@@ -63,18 +61,11 @@ impl Server {
                     if let Err(e) = stream.set_nonblocking(true) {
                         eprintln!("Failed to set stream nonblocking: {:?}", e);
                     } else {
-                        let client_id = {
-                            let mut next_id = state.next_client_id.borrow_mut();
-                            let id = *next_id;
-                            *next_id += 1;
-                            id
-                        };
-
                         let stream_rc = Rc::new(RefCell::new(stream));
-                        state
+                        let client_id = state
                             .connected_clients
                             .borrow_mut()
-                            .insert(client_id, stream_rc.clone());
+                            .insert(stream_rc.clone());
 
                         follow_up_events.push(Self::create_read_event(client_id, stream_rc));
                     }

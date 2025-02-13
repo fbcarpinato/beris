@@ -1,14 +1,15 @@
 use std::collections::VecDeque;
+use smallvec::SmallVec;
 
 pub struct Event {
-    callback: Box<dyn Fn() -> Vec<Event>>
+    callback: Box<dyn Fn() -> SmallVec<[Event; 4]>>
 }
 
 
 impl Event {
     pub fn new<F>(callback: F) -> Self
     where
-        F: 'static + Fn() -> Vec<Event>,
+        F: 'static + Fn() -> SmallVec<[Event; 4]>,
     {
         Self {
             callback: Box::new(callback)

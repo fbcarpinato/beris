@@ -11,6 +11,7 @@ use std::{
 
 use event_loop::{Event, EventLoop};
 use slab::Slab;
+use smallvec::SmallVec;
 
 #[derive(Clone)]
 pub struct SharedState {
@@ -53,7 +54,7 @@ impl Server {
 
     fn create_accept_event(state: SharedState) -> Event {
         Event::new(move || {
-            let mut follow_up_events = Vec::new();
+            let mut follow_up_events: SmallVec<[Event; 4]> = SmallVec::new();
 
             match state.listener.accept() {
                 Ok((stream, addr)) => {
@@ -86,7 +87,7 @@ impl Server {
     fn create_read_event(client_id: usize, stream_rc: Rc<RefCell<TcpStream>>) -> Event {
         Event::new(move || {
             let mut buffer = [0u8; 1024];
-            let mut follow_up_events = Vec::new();
+            let mut follow_up_events: SmallVec<[Event; 4]> = SmallVec::new();
 
             let read_result = {
                 let mut stream = stream_rc.borrow_mut();

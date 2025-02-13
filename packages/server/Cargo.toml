@@ -13,4 +13,5 @@ name = "ping_benchmark"
 
 [dependencies]
 slab = "0.4.9"
+smallvec = "1.13.2"
 

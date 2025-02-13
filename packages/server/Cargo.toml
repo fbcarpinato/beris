@@ -12,6 +12,7 @@ path = "src/bin/main.rs"
 name = "ping_benchmark"
 
 [dependencies]
+arraydeque = "0.5.1"
 slab = "0.4.9"
 smallvec = "1.13.2"
 

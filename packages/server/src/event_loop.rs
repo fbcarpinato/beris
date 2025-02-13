@@ -1,5 +1,7 @@
-use std::collections::VecDeque;
 use smallvec::SmallVec;
+use arraydeque::{ArrayDeque, Wrapping};
+
+const EVENT_QUEUE_SIZE: usize = 1024;
 
 pub struct Event {
     callback: Box<dyn Fn() -> SmallVec<[Event; 4]>>
@@ -18,13 +20,13 @@ impl Event {
 }
 
 pub struct EventLoop {
-    queue: VecDeque<Event>
+    queue: ArrayDeque<Event, EVENT_QUEUE_SIZE, Wrapping>,
 }
 
 impl EventLoop {
     pub fn new() -> Self {
         Self {
-            queue: VecDeque::new()
+            queue: ArrayDeque::new()
         }
     }
 
@@ -33,17 +35,13 @@ impl EventLoop {
     }
 
     pub fn run(&mut self) {
-        while !self.queue.is_empty() {
-            let task = self.queue.pop_front();
+        let mut temp_queue: ArrayDeque<Event, EVENT_QUEUE_SIZE, Wrapping> = ArrayDeque::new();
+        std::mem::swap(&mut self.queue, &mut temp_queue);
 
-            match task {
-                Some(task) => {
-                    let events = (task.callback)();
+        for event in temp_queue {
+            let events = (event.callback)();
 
-                    self.queue.extend(events);
-                },
-                None => {}
-            }
+            self.queue.extend(events);
         }
     }
 }

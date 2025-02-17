@@ -2,29 +2,24 @@ use arraydeque::{ArrayDeque, Wrapping};
 use io_uring::{opcode, types, IoUring};
 use nix::sys::eventfd::{EfdFlags, EventFd};
 use nix::unistd::write;
-use smallvec::SmallVec;
+use std::io::{self, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex};
 
+use crate::SharedState;
+
 const EVENT_QUEUE_SIZE: usize = 1024;
 
-pub struct Event {
-    callback: Box<dyn Fn() -> SmallVec<[Event; 4]> + Send + Sync>,
+pub enum EventType {
+    AcceptConnection(SharedState),
+    Read {
+        client_id: usize,
+        state: SharedState,
+    },
 }
-
-impl Event {
-    pub fn new<F>(callback: F) -> Self
-    where
-        F: 'static + Fn() -> SmallVec<[Event; 4]> + Send + Sync,
-    {
-        Self {
-            callback: Box::new(callback),
-        }
-    }
-}
-
 pub struct EventLoop {
-    queue: Arc<Mutex<ArrayDeque<Event, EVENT_QUEUE_SIZE, Wrapping>>>,
+    queue: Arc<Mutex<ArrayDeque<EventType, EVENT_QUEUE_SIZE, Wrapping>>>,
     event_fd: EventFd,
     io_uring: IoUring,
     event_buffer: [u8; 8],
@@ -47,7 +42,7 @@ impl EventLoop {
         event_loop
     }
 
-    pub fn push(&self, event: Event) {
+    pub fn push(&self, event: EventType) {
         let mut queue = self.queue.lock().unwrap();
         queue.push_back(event);
 
@@ -97,9 +92,13 @@ impl EventLoop {
         };
 
         for event in temp_queue {
-            let new_events = (event.callback)();
-            for event in new_events {
-                self.push(event);
+            match event {
+                EventType::AcceptConnection(state) => {
+                    self.process_accept_connection_event(state);
+                }
+                EventType::Read { client_id, state } => {
+                    self.process_read_event(client_id, state);
+                }
             }
         }
     }
@@ -125,5 +124,79 @@ impl EventLoop {
         self.io_uring
             .submit()
             .map_err(|e| format!("Failed to submit io_uring: {:?}", e))
+    }
+
+    fn process_accept_connection_event(&mut self, state: SharedState) {
+        match state.listener.accept() {
+            Ok((stream, addr)) => {
+                println!("Accepted connection from {:?}", addr);
+
+                if let Err(e) = stream.set_nonblocking(true) {
+                    eprintln!("Failed to set stream nonblocking: {:?}", e);
+                } else {
+                    let stream_arc = Arc::new(Mutex::new(stream));
+                    let client_id = state
+                        .connected_clients
+                        .lock()
+                        .unwrap()
+                        .insert(stream_arc.clone());
+
+                    self.push(EventType::Read { client_id, state: state.clone() });
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+            }
+            Err(e) => {
+                eprintln!("Error accepting connection: {:?}", e);
+            }
+        }
+
+        self.push(EventType::AcceptConnection(state.clone()));
+    }
+
+    fn process_read_event(&mut self, client_id: usize, state: SharedState) {
+        let mut buffer = [0u8; 1024];
+
+        let client_stream  = {
+            let clients = state.connected_clients.lock().unwrap();
+            clients.get(client_id).cloned()
+        };
+
+        if let Some(client_stream) = client_stream {
+            let mut stream = client_stream.lock().unwrap();
+
+            match stream.read(&mut buffer) {
+                Ok(0) => {
+                    println!("Client {} disconnected", client_id);
+                    let _ = stream.shutdown(Shutdown::Both);
+                    let mut clients = state.connected_clients.lock().unwrap();
+                    clients.remove(client_id);
+                }
+                Ok(n) => {
+                    println!(
+                        "Read {} bytes from client {}: {:?}",
+                        n,
+                        client_id,
+                        &buffer[..n]
+                    );
+
+                    if let Err(e) = stream.write_all(&buffer[..n]) {
+                        eprintln!("Error writing to client {}: {:?}", client_id, e);
+                    } else {
+                        println!("Echoed {} bytes back to client {}", n, client_id);
+                    }
+
+                    self.push(EventType::Read { client_id, state: state.clone() });
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.push(EventType::Read { client_id, state: state.clone() });
+                }
+                Err(e) => {
+                    eprintln!("Error reading from client {}: {:?}", client_id, e);
+                }
+            }
+        } else {
+            eprintln!("Client {} not found in connected clients", client_id);
+        }
     }
 }

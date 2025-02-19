@@ -1,3 +1,4 @@
+use bumpalo::Bump;
 use io_uring::{opcode, types, IoUring};
 use nix::unistd::close;
 use std::os::fd::AsRawFd;
@@ -13,26 +14,29 @@ enum Operation {
     Read {
         client_id: usize,
         client_fd: i32,
-        buffer: Box<[u8; 1024]>,
     },
 
     Write {
         client_id: usize,
         client_fd: i32,
-        buffer: Vec<u8>
     },
 }
 
 pub struct EventLoop {
     io_uring: IoUring,
     state: State,
+    alloc: Bump
 }
 
 impl EventLoop {
     pub fn new(state: State) -> Self {
         let io_uring = IoUring::new(EVENT_QUEUE_SIZE).expect("Failed to create io_uring");
 
-        Self { io_uring, state }
+        Self {
+            io_uring,
+            state,
+            alloc: Bump::with_capacity(1024 * 1000)
+        }
     }
 
     pub fn run(&mut self) {
@@ -73,7 +77,6 @@ impl EventLoop {
                     Operation::Read {
                         client_id,
                         client_fd,
-                        buffer: _
                     } => {
                         if res <= 0 {
                             if res == 0 {
@@ -89,7 +92,7 @@ impl EventLoop {
                             self.submit_write_operation(client_id);
                         }
                     }
-                    Operation::Write { client_id, client_fd: _, buffer: _ } => {
+                    Operation::Write { client_id, client_fd: _ } => {
                         println!("Write complete for client {}", client_id);
                         self.submit_read_operation(client_id);
                     }
@@ -121,13 +124,12 @@ impl EventLoop {
             .get_client(client_id)
             .expect(format!("Failed to find client_fd with client_id {}", client_id).as_str());
 
-        let mut buffer = Box::new([0u8; 1024]);
+        let buffer = self.alloc.alloc([0u8; 1024]);
         let buf_ptr = buffer.as_mut_ptr();
 
         let op = Box::new(Operation::Read {
             client_id,
             client_fd,
-            buffer,
         });
         let user_data = Box::into_raw(op) as u64;
 
@@ -149,17 +151,15 @@ impl EventLoop {
             .get_client(client_id)
             .expect(format!("Failed to find client_fd with client_id {}", client_id).as_str());
 
-        let response = format!("+PONG\r\n");
-        let response_bytes = response.into_bytes();
+        let response = self.alloc.alloc_str("+PONG\r\n");
 
         let op = Box::new(Operation::Write {
             client_id,
             client_fd,
-            buffer: response_bytes.clone(),
         });
         let user_data = Box::into_raw(op) as u64;
 
-        let entry = opcode::Write::new(types::Fd(client_fd), response_bytes.as_ptr(), response_bytes.len() as u32)
+        let entry = opcode::Write::new(types::Fd(client_fd), response.as_ptr(), response.len() as u32)
             .build()
             .user_data(user_data);
 

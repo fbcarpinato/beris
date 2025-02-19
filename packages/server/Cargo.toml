@@ -13,6 +13,7 @@ name = "ping_benchmark"
 
 [dependencies]
 arraydeque = "0.5.1"
+bumpalo = { version = "3.17.0", features = ["boxed"] }
 io-uring = "0.7.4"
 nix = { version = "0.29.0", features = ["event", "poll"] }
 slab = "0.4.9"

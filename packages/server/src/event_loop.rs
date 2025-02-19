@@ -1,61 +1,43 @@
-use arraydeque::{ArrayDeque, Wrapping};
 use io_uring::{opcode, types, IoUring};
-use nix::sys::eventfd::{EfdFlags, EventFd};
-use nix::unistd::write;
-use std::io::{self, Read, Write};
-use std::net::Shutdown;
-use std::os::fd::{AsFd, AsRawFd};
-use std::sync::{Arc, Mutex};
+use nix::unistd::close;
+use std::os::fd::AsRawFd;
+use std::ptr;
 
-use crate::SharedState;
+use crate::state::State;
 
-const EVENT_QUEUE_SIZE: usize = 1024;
+const EVENT_QUEUE_SIZE: u32 = 1024;
 
-pub enum EventType {
-    AcceptConnection(SharedState),
+enum Operation {
+    Accept,
+
     Read {
         client_id: usize,
-        state: SharedState,
+        client_fd: i32,
+        buffer: Box<[u8; 1024]>,
+    },
+
+    Write {
+        client_id: usize,
+        client_fd: i32,
+        buffer: Vec<u8>
     },
 }
+
 pub struct EventLoop {
-    queue: Arc<Mutex<ArrayDeque<EventType, EVENT_QUEUE_SIZE, Wrapping>>>,
-    event_fd: EventFd,
     io_uring: IoUring,
-    event_buffer: [u8; 8],
+    state: State,
 }
 
 impl EventLoop {
-    pub fn new() -> Self {
-        let event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
-            .expect("Failed to create eventfd");
-        let io_uring = IoUring::new(32).expect("Failed to create io_uring");
+    pub fn new(state: State) -> Self {
+        let io_uring = IoUring::new(EVENT_QUEUE_SIZE).expect("Failed to create io_uring");
 
-        let mut event_loop = Self {
-            queue: Arc::new(Mutex::new(ArrayDeque::new())),
-            event_fd,
-            io_uring,
-            event_buffer: [0u8; 8],
-        };
-
-        event_loop.arm_io_uring().expect("Failed to arm io_uring");
-        event_loop
-    }
-
-    pub fn push(&self, event: EventType) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.push_back(event);
-
-        let one: u64 = 1;
-
-        let event_fd = self.event_fd.as_fd();
-
-        if let Err(e) = write(event_fd, &one.to_ne_bytes()) {
-            eprintln!("Failed to signal eventfd: {:?}", e);
-        }
+        Self { io_uring, state }
     }
 
     pub fn run(&mut self) {
+        self.submit_accept_operation();
+
         loop {
             match self.io_uring.submit_and_wait(1) {
                 Ok(_) => (),
@@ -65,138 +47,126 @@ impl EventLoop {
                 }
             }
 
-            let cqes: Vec<_> = self.io_uring.completion().collect();
+            let completions: Vec<_> = self.io_uring.completion().collect();
 
-            for cqe in cqes {
-                if cqe.user_data() == 0 {
-                    if cqe.result() < 0 {
-                        eprintln!("Error in eventfd read: {}", cqe.result());
-                        break;
+            for cqe in completions {
+                let res = cqe.result();
+
+                let op_ptr = cqe.user_data() as *mut Operation;
+                let op = unsafe { Box::from_raw(op_ptr) };
+
+                match *op {
+                    Operation::Accept => {
+                        if res < 0 {
+                            eprintln!("Accept error: {}", res);
+                        } else {
+                            let client_fd = res;
+                            println!("Accepted client with fd: {}", client_fd);
+
+                            let client_id = self.state.add_client(client_fd);
+
+                            self.submit_read_operation(client_id);
+                        }
+
+                        self.submit_accept_operation();
                     }
-
-                    self.process_events();
-
-                    if let Err(e) = self.arm_io_uring() {
-                        eprintln!("Failed to re-arm io_uring: {:?}", e);
-                        break;
+                    Operation::Read {
+                        client_id,
+                        client_fd,
+                        buffer: _
+                    } => {
+                        if res <= 0 {
+                            if res == 0 {
+                                println!("Client {} disconnected", client_id);
+                            } else {
+                                eprintln!("Read error on client {}: {}", client_id, res);
+                            }
+                            let _ = close(client_fd);
+                            self.state.remove_client(client_id);
+                        } else {
+                            let n = res as usize;
+                            println!("Read {} bytes from client {}", n, client_id);
+                            self.submit_write_operation(client_id);
+                        }
+                    }
+                    Operation::Write { client_id, client_fd: _, buffer: _ } => {
+                        println!("Write complete for client {}", client_id);
+                        self.submit_read_operation(client_id);
                     }
                 }
             }
         }
     }
 
-    fn process_events(&mut self) {
-        let temp_queue = {
-            let mut queue = self.queue.lock().unwrap();
-            std::mem::replace(&mut *queue, ArrayDeque::new())
-        };
+    fn submit_accept_operation(&mut self) {
+        let fd = self.state.listener.as_raw_fd();
 
-        for event in temp_queue {
-            match event {
-                EventType::AcceptConnection(state) => {
-                    self.process_accept_connection_event(state);
-                }
-                EventType::Read { client_id, state } => {
-                    self.process_read_event(client_id, state);
-                }
-            }
-        }
-    }
+        let op = Box::new(Operation::Accept);
+        let user_data = Box::into_raw(op) as u64;
 
-    fn arm_io_uring(&mut self) -> Result<usize, String> {
-        self.event_buffer = [0u8; 8];
+        let entry = opcode::Accept::new(types::Fd(fd), ptr::null_mut(), ptr::null_mut())
+            .build()
+            .user_data(user_data);
 
         unsafe {
-            let sqe = opcode::Read::new(
-                types::Fd(self.event_fd.as_fd().as_raw_fd()),
-                self.event_buffer.as_mut_ptr(),
-                self.event_buffer.len() as _,
-            )
+            self.io_uring.submission().push(&entry).unwrap();
+        }
+
+        self.io_uring.submit().expect("Submit accept failed");
+    }
+
+    fn submit_read_operation(&mut self, client_id: usize) {
+        let client_fd = self
+            .state
+            .get_client(client_id)
+            .expect(format!("Failed to find client_fd with client_id {}", client_id).as_str());
+
+        let mut buffer = Box::new([0u8; 1024]);
+        let buf_ptr = buffer.as_mut_ptr();
+
+        let op = Box::new(Operation::Read {
+            client_id,
+            client_fd,
+            buffer,
+        });
+        let user_data = Box::into_raw(op) as u64;
+
+        let entry = opcode::Read::new(types::Fd(client_fd), buf_ptr, 1024)
             .build()
-            .user_data(0);
+            .user_data(user_data);
 
-            match self.io_uring.submission().push(&sqe) {
-                Ok(_) => (),
-                Err(e) => return Err(format!("Failed to push SQE to io_uring: {:?}", e)),
-            }
+        unsafe {
+            self.io_uring.submission().push(&entry).unwrap();
         }
 
-        self.io_uring
-            .submit()
-            .map_err(|e| format!("Failed to submit io_uring: {:?}", e))
+        self.io_uring.submit().expect("Submit accept failed");
     }
 
-    fn process_accept_connection_event(&mut self, state: SharedState) {
-        match state.listener.accept() {
-            Ok((stream, addr)) => {
-                println!("Accepted connection from {:?}", addr);
 
-                if let Err(e) = stream.set_nonblocking(true) {
-                    eprintln!("Failed to set stream nonblocking: {:?}", e);
-                } else {
-                    let stream_arc = Arc::new(Mutex::new(stream));
-                    let client_id = state
-                        .connected_clients
-                        .lock()
-                        .unwrap()
-                        .insert(stream_arc.clone());
+    fn submit_write_operation(&mut self, client_id: usize) {
+        let client_fd = self
+            .state
+            .get_client(client_id)
+            .expect(format!("Failed to find client_fd with client_id {}", client_id).as_str());
 
-                    self.push(EventType::Read { client_id, state: state.clone() });
-                }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-            }
-            Err(e) => {
-                eprintln!("Error accepting connection: {:?}", e);
-            }
+        let response = format!("+PONG\r\n");
+        let response_bytes = response.into_bytes();
+
+        let op = Box::new(Operation::Write {
+            client_id,
+            client_fd,
+            buffer: response_bytes.clone(),
+        });
+        let user_data = Box::into_raw(op) as u64;
+
+        let entry = opcode::Write::new(types::Fd(client_fd), response_bytes.as_ptr(), response_bytes.len() as u32)
+            .build()
+            .user_data(user_data);
+
+        unsafe {
+            self.io_uring.submission().push(&entry).unwrap();
         }
 
-        self.push(EventType::AcceptConnection(state.clone()));
-    }
-
-    fn process_read_event(&mut self, client_id: usize, state: SharedState) {
-        let mut buffer = [0u8; 1024];
-
-        let client_stream  = {
-            let clients = state.connected_clients.lock().unwrap();
-            clients.get(client_id).cloned()
-        };
-
-        if let Some(client_stream) = client_stream {
-            let mut stream = client_stream.lock().unwrap();
-
-            match stream.read(&mut buffer) {
-                Ok(0) => {
-                    println!("Client {} disconnected", client_id);
-                    let _ = stream.shutdown(Shutdown::Both);
-                    let mut clients = state.connected_clients.lock().unwrap();
-                    clients.remove(client_id);
-                }
-                Ok(n) => {
-                    println!(
-                        "Read {} bytes from client {}: {:?}",
-                        n,
-                        client_id,
-                        &buffer[..n]
-                    );
-
-                    if let Err(e) = stream.write_all(&buffer[..n]) {
-                        eprintln!("Error writing to client {}: {:?}", client_id, e);
-                    } else {
-                        println!("Echoed {} bytes back to client {}", n, client_id);
-                    }
-
-                    self.push(EventType::Read { client_id, state: state.clone() });
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.push(EventType::Read { client_id, state: state.clone() });
-                }
-                Err(e) => {
-                    eprintln!("Error reading from client {}: {:?}", client_id, e);
-                }
-            }
-        } else {
-            eprintln!("Client {} not found in connected clients", client_id);
-        }
+        self.io_uring.submit().expect("Submit accept failed");
     }
 }

@@ -1,5 +1,5 @@
-use std::io;
 use clap::Parser;
+use std::io;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -13,7 +13,6 @@ struct Args {
     #[arg(short, long, default_value_t = 100)]
     requests: usize,
 }
-
 
 fn main() -> io::Result<()> {
     let args = Args::parse();

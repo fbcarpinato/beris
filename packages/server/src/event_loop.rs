@@ -11,21 +11,15 @@ const EVENT_QUEUE_SIZE: u32 = 1024;
 enum Operation {
     Accept,
 
-    Read {
-        client_id: usize,
-        client_fd: i32,
-    },
+    Read { client_id: usize, client_fd: i32 },
 
-    Write {
-        client_id: usize,
-        client_fd: i32,
-    },
+    Write { client_id: usize, client_fd: i32 },
 }
 
 pub struct EventLoop {
     io_uring: IoUring,
     state: State,
-    alloc: Bump
+    alloc: Bump,
 }
 
 impl EventLoop {
@@ -35,7 +29,7 @@ impl EventLoop {
         Self {
             io_uring,
             state,
-            alloc: Bump::with_capacity(1024 * 1000)
+            alloc: Bump::with_capacity(1024 * 1000),
         }
     }
 
@@ -92,7 +86,10 @@ impl EventLoop {
                             self.submit_write_operation(client_id);
                         }
                     }
-                    Operation::Write { client_id, client_fd: _ } => {
+                    Operation::Write {
+                        client_id,
+                        client_fd: _,
+                    } => {
                         println!("Write complete for client {}", client_id);
                         self.submit_read_operation(client_id);
                     }
@@ -143,7 +140,6 @@ impl EventLoop {
 
         self.io_uring.submit().expect("Submit accept failed");
     }
-
 
     fn submit_write_operation(&mut self, client_id: usize) {
         let client_fd = self

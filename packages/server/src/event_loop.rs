@@ -159,9 +159,13 @@ impl EventLoop {
         });
         let user_data = Box::into_raw(op) as u64;
 
-        let entry = opcode::Write::new(types::Fd(client_fd), response.as_ptr(), response.len() as u32)
-            .build()
-            .user_data(user_data);
+        let entry = opcode::Write::new(
+            types::Fd(client_fd),
+            response.as_ptr(),
+            response.len() as u32,
+        )
+        .build()
+        .user_data(user_data);
 
         unsafe {
             self.io_uring.submission().push(&entry).unwrap();

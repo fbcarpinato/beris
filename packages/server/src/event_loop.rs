@@ -1,9 +1,11 @@
 use bumpalo::Bump;
 use io_uring::{opcode, types, IoUring};
 use nix::unistd::close;
+use core::slice;
 use std::os::fd::AsRawFd;
 use std::ptr;
 
+use crate::resp::RespType;
 use crate::state::State;
 
 const EVENT_QUEUE_SIZE: u32 = 1024;
@@ -11,7 +13,7 @@ const EVENT_QUEUE_SIZE: u32 = 1024;
 enum Operation {
     Accept,
 
-    Read { client_id: usize, client_fd: i32 },
+    Read { client_id: usize, client_fd: i32, buf_ptr: *mut u8 },
 
     Write { client_id: usize, client_fd: i32 },
 }
@@ -71,6 +73,7 @@ impl EventLoop {
                     Operation::Read {
                         client_id,
                         client_fd,
+                        buf_ptr
                     } => {
                         if res <= 0 {
                             if res == 0 {
@@ -84,6 +87,19 @@ impl EventLoop {
                             let n = res as usize;
                             println!("Read {} bytes from client {}", n, client_id);
                             self.submit_write_operation(client_id);
+
+                            let buffer = unsafe {
+                                slice::from_raw_parts(buf_ptr, 1024).to_vec()
+                            };
+
+                            match RespType::from_vec(buffer) {
+                                Ok(resp_type) => {
+                                    println!("Received: {}", resp_type);
+                                },
+                                Err(err) => {
+                                    eprintln!("{}", err);
+                                }
+                            }
                         }
                     }
                     Operation::Write {
@@ -127,6 +143,7 @@ impl EventLoop {
         let op = Box::new(Operation::Read {
             client_id,
             client_fd,
+            buf_ptr
         });
         let user_data = Box::into_raw(op) as u64;
 

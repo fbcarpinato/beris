@@ -1,6 +1,7 @@
 mod event_loop;
 mod resp;
 mod state;
+mod command;
 
 use std::{io, net::TcpListener};
 

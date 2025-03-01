@@ -1,4 +1,4 @@
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, Paragraph},
@@ -7,7 +7,7 @@ use ratatui::{
 use std::{
     io::{Read, Result, Write},
     net::TcpStream,
-    str,
+    str ,
 };
 use tui_input::{Input, InputRequest};
 

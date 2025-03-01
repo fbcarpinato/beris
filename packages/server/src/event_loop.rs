@@ -5,6 +5,7 @@ use core::slice;
 use std::os::fd::AsRawFd;
 use std::ptr;
 
+use crate::command::Command;
 use crate::resp::RespType;
 use crate::state::State;
 
@@ -86,20 +87,30 @@ impl EventLoop {
                         } else {
                             let n = res as usize;
                             println!("Read {} bytes from client {}", n, client_id);
-                            self.submit_write_operation(client_id);
 
                             let buffer = unsafe {
-                                slice::from_raw_parts(buf_ptr, 1024).to_vec()
+                                slice::from_raw_parts(buf_ptr, n).to_vec()
                             };
 
-                            match RespType::from_vec(buffer) {
+                            let response = match RespType::from_vec(buffer) {
                                 Ok(resp_type) => {
-                                    println!("Received: {}", resp_type);
+                                    match Command::from_resp_type(resp_type) {
+                                        Some(command) => {
+                                            command.handle()
+                                        },
+                                        None => {
+                                            format!("Unable to parse command").to_string()
+                                        }
+                                    }
                                 },
                                 Err(err) => {
                                     eprintln!("{}", err);
+
+                                    format!("Unable to RESP from request").to_string()
                                 }
-                            }
+                            };
+
+                            self.submit_write_operation(client_id, response);
                         }
                     }
                     Operation::Write {
@@ -158,13 +169,11 @@ impl EventLoop {
         self.io_uring.submit().expect("Submit accept failed");
     }
 
-    fn submit_write_operation(&mut self, client_id: usize) {
+    fn submit_write_operation(&mut self, client_id: usize, response: String) {
         let client_fd = self
             .state
             .get_client(client_id)
             .expect(format!("Failed to find client_fd with client_id {}", client_id).as_str());
-
-        let response = self.alloc.alloc_str("+PONG\r\n");
 
         let op = Box::new(Operation::Write {
             client_id,
